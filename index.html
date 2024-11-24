@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Publication Network</title>
+    <style>
+        .link {
+            stroke: #999;
+            stroke-opacity: 0.6;
+        }
+
+        .tooltip {
+            position: absolute;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            padding: 5px;
+            border-radius: 3px;
+            pointer-events: none;
+            font-size: 12px;
+        }
+
+        .controls {
+            margin-bottom: 10px;
+        }
+
+        svg {
+            display: block;
+            margin: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <label for="charge">Charge:</label>
+        <input type="range" id="charge" min="-300" max="0" value="-150">
+        <label for="collide">Collide Radius:</label>
+        <input type="range" id="collide" min="1" max="20" value="10">
+        <label for="linkStrength">Link Strength:</label>
+        <input type="range" id="linkStrength" min="0" max="1" step="0.1" value="0.7">
+    </div>
+    <div id="chart"></div>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+        // Define dimensions
+        const width = 1000, height = 800;
+
+        // Create the SVG canvas
+        const svg = d3.select("#chart")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        // Create a main group for centering
+        const main_group = svg.append("g")
+            .attr("transform", `translate(${width / 2},${height / 2})`);
+
+        // Create a tooltip
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip")
+            .style("opacity", 0);
+
+        // Load JSON data
+        d3.json("filtered_publication_network12.json").then(data => {
+            // Filter data to exclude records missing Year, Affiliation, or Author
+            data.nodes = data.nodes.filter(node => node.metadata.Year && node.metadata.Affiliation && node.id);
+            data.links = data.links.filter(link => link.source && link.target);
+
+            // Calculate node degrees
+            let node_degree = {};
+            data.links.forEach(d => {
+                node_degree[d.source] = (node_degree[d.source] || 0) + 1;
+                node_degree[d.target] = (node_degree[d.target] || 0) + 1;
+            });
+
+            // Define radius scale based on node degree
+            const scale_radius = d3.scaleSqrt()
+                .domain(d3.extent(Object.values(node_degree)))
+                .range([3, 12]);
+
+            // Calculate country counts
+            const countryCounts = {};
+            data.nodes.forEach(node => {
+                const country = node.metadata.Affiliation.split(', ').pop();
+                if (country) {
+                    countryCounts[country] = (countryCounts[country] || 0) + 1;
+                }
+            });
+
+            // Get top 10 countries
+            const topCountries = Object.entries(countryCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 10)
+                .map(entry => entry[0]);
+
+            // Color scale for countries
+            const colorScale = d3.scaleOrdinal(d3.schemeCategory10)
+                .domain(topCountries);
+
+            // Get color by country
+            const getColorByCountry = (affiliation) => {
+                const country = affiliation.split(', ').pop();
+                return topCountries.includes(country) ? colorScale(country) : "#A9A9A9";
+            };
+
+            // Append link elements
+            const link_elements = main_group.append("g")
+                .selectAll(".line")
+                .data(data.links)
+                .enter()
+                .append("line")
+                .attr("class", "link")
+                .attr("stroke", "grey");
+
+            // Append node elements
+            const node_elements = main_group.append("g")
+                .selectAll(".circle")
+                .data(data.nodes)
+                .enter()
+                .append('g')
+                .attr("class", d => `gr${d.metadata.Publisher.replace(/[\s.,\/]/g, '')}`)
+                .on("mouseover", function (event, data) {
+                    const affiliation = data.metadata.Affiliation;
+                    node_elements.selectAll("circle")
+                        .style("opacity", d => d.metadata.Affiliation === affiliation ? 1 : 0.2);
+                    link_elements
+                        .style("opacity", l => l.source.metadata.Affiliation === affiliation || l.target.metadata.Affiliation === affiliation ? 1 : 0.2);
+                })
+                .on("mouseout", function () {
+                    node_elements.selectAll("circle").style("opacity", 1);
+                    link_elements.style("opacity", 1);
+                })
+                .on("click", function (event, data) {
+                    tooltip.transition().duration(200).style("opacity", .9);
+                    tooltip.html(`Author: ${data.id}<br>Affiliation: ${data.metadata.Affiliation}<br>Year: ${data.metadata.Year}<br>Title: ${data.metadata.Title}<br>Publisher: ${data.metadata.Publisher}`)
+                        .style("left", (event.pageX + 5) + "px")
+                        .style("top", (event.pageY - 28) + "px");
+
+                    tooltip.transition()
+                        .delay(10000) // Hide tooltip after 10 seconds
+                        .duration(200)
+                        .style("opacity", 0);
+                });
+
+            // Append circles for nodes
+            node_elements.append("circle")
+                .attr("r", d => scale_radius(node_degree[d.id] || 0))
+                .attr("fill", d => getColorByCountry(d.metadata.Affiliation));
+
+            // Force Simulation
+            let tickCount = 0;
+            let ForceSimulation = d3.forceSimulation(data.nodes)
+                .force("collide", d3.forceCollide().radius(d => scale_radius(node_degree[d.id])  ))
+                .force("x", d3.forceX())
+                .force("y", d3.forceY())
+                .force("charge", d3.forceManyBody().strength(-13))
+                .force("link", d3.forceLink(data.links).id(d => d.id).strength(0.5))
+                .on("tick", () => {
+                    tickCount++;
+                    if (tickCount > 200) { 
+                        ForceSimulation.stop();
+                    }
+                    ticked();
+                });
+
+
+            // Update forces when sliders change
+            function updateForces() {
+                const chargeStrength = parseInt(document.getElementById("charge").value);
+                const collisionRadius = parseInt(document.getElementById("collide").value);
+                const linkStrength = parseFloat(document.getElementById("linkStrength").value);
+
+                ForceSimulation
+                    .force("charge", d3.forceManyBody().strength(chargeStrength))
+                    .force("collide", d3.forceCollide().radius(d => scale_radius(node_degree[d.id]) * collisionRadius / 12))
+                    .force("link", d3.forceLink(data.links).id(d => d.id).strength(linkStrength))
+                    .alpha(1) // Restart simulation immediately
+                    .restart();
+            }
+
+            // Add event listeners for sliders
+            document.getElementById("charge").addEventListener("input", updateForces);
+            document.getElementById("collide").addEventListener("input", updateForces);
+            document.getElementById("linkStrength").addEventListener("input", updateForces);
+
+            // Update node and link positions on each tick
+            function ticked() {
+                node_elements.attr('transform', d => `translate(${d.x},${d.y})`);
+                link_elements
+                    .attr("x1", d => d.source.x)
+                    .attr("x2", d => d.target.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("y2", d => d.target.y);
+            }
+
+            // Zoom functionality
+            svg.call(d3.zoom()
+                .extent([[0, 0], [width, height]])
+                .scaleExtent([1, 8])
+                .on("zoom", ({ transform }) => main_group.attr("transform", transform)));
+        });
+    </script>
+</body>
+</html>
